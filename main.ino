@@ -5,7 +5,8 @@
 #include <DHT.h>
 #include <Ticker.h>
 #include <BluetoothSerial.h>
-
+#include "time.h"
+#include <ArduinoJson.h>
 
 
 #define DHTTYPE DHT11
@@ -17,23 +18,38 @@ WiFiClient espClient;
 PubSubClient client(espClient); // Initialize MQTT Client
 DHT dht(DHTPIN, DHTTYPE);
 Ticker dhtTicker;
+Ticker Timeticker;
 BluetoothSerial BT;
 
 bool SwitchState1 = LOW;
 bool SwitchState2 = LOW;
 bool SwitchState3 = LOW;
 bool SwitchState4 = LOW;
+
+bool status1 = LOW;
+bool status2 = LOW;
+bool status3 = LOW;
+bool status4 = LOW;
+
+int savedhour;
+int savedminute;
+String savedmessage;
+//bool eventtime = false;
 // --- Variables ---
 char userID[50] = "default_user"; 
 const char* mqtt_server = "broker.emqx.io"; // Free Public Broker
 const int mqtt_port = 1883; // TCP Port
-
+const char* ntpServer = "pool.ntp.org";
+const long gmt = 19800;
+const int daylight = 0;
+String jsondata = "";
 // --- Topics (Buffers to hold dynamic topic names) ---
 char subTopic[100]; // iot/USERID/to_device
 char pubTopic[100]; // iot/USERID/from_device
 char dhtTopicT[100];
 char dhtTopicH[100];
 char HighTempTopic[100];
+char timesubtopic[100];
 
 // --- Timers (Non-Blocking Delays) ---
 unsigned long lastReconnectAttempt = 0;
@@ -60,6 +76,7 @@ void setup() {
   Serial.begin(115200);
   dht.begin();
   BT.begin("Ble esp"); 
+  pref.begin("timedata",true);
   pinMode(DHTPIN, INPUT);
   pinMode(RESET_PIN, INPUT_PULLUP);
   pinMode(LED_PIN, OUTPUT);
@@ -72,9 +89,20 @@ void setup() {
   pinMode(switch_3, INPUT_PULLUP);
   pinMode(switch_4, INPUT_PULLUP);
 
+  if(pref.isKey("hours") && pref.isKey("minute")){
+    savedhour = pref.getInt("hours",-1);
+    savedminute = pref.getInt("minute",-1);
+    savedmessage = pref.getString("mode","");
+  }
+
+  pref.end();
+  
+
+
 
   //run Dht data
   dhtTicker.attach(5.0,DHTdata);
+  Timeticker.attach(10.0,Timefunc);
   
   // 1. Load User ID from Storage
   pref.begin("data", false); 
@@ -116,6 +144,9 @@ void setup() {
   // 5. Setup MQTT
   client.setServer(mqtt_server, mqtt_port);
   client.setCallback(callback); // Define function to call when message arrives
+
+  configTime(gmt,daylight,ntpServer);//Configure the time with the settings 
+  Timefunc();
   
   Serial.println("Setup Complete. Entering Loop...");
 }
@@ -155,7 +186,12 @@ void loop() {
 
   // --- 3. Other Logic (Relays, Sensors) goes here ---
   // Note: Because we use 'if (now - last...)' above, the code flows freely here!
-  manual(); 
+  manual();
+
+  if(WiFi.status() == WL_CONNECTED){
+      Timefunc();
+  }
+
 
   if(WiFi.status() != WL_CONNECTED){
     Bluetoothsetup();
@@ -215,6 +251,7 @@ void manual(){
 // 1. Update Topic Strings
 void updateTopics() {
   // Create topics: "iot/<userID>/to_device"
+  snprintf(timesubtopic, 100, "iot/%s/to_time",userID);
   snprintf(subTopic, 100, "iot/%s/to_device", userID);
   snprintf(pubTopic, 100, "iot/%s/from_device", userID);
   snprintf(dhtTopicT, 100, "iot/%s/from_device/t", userID);
@@ -235,6 +272,7 @@ void callback(char* topic, byte* payload, unsigned int length) {
   for (int i = 0; i < length; i++) {
     message += (char)payload[i];
   }
+  jsondata = message;
   Serial.println(message);
 
   // --- CONTROL LOGIC ---
@@ -404,3 +442,79 @@ void Bluetoothsetup(){
     }
   }
 }
+
+//For ntp
+
+void Timefunc(){
+  struct tm timeinfo;//In that function, create a time structure (struct tm) called timeinfo that contains all the details about the time (min, sec, hour, etc…).
+  StaticJsonDocument<200> doc;
+
+  DeserializationError error = deserializeJson(doc,jsondata);
+
+
+  if(!getLocalTime(&timeinfo)){
+    Serial.print("time not");
+    return;
+  }
+  //Serial.println(&timeinfo, "%A, %B %d %H:%M:%S");
+
+  String j_message = doc["mode"].as<String>();
+  int j_hours = doc["hour"];
+  int j_minute = doc["minute"];
+
+  pref.begin("timedata",false);
+  pref.putString("mode",j_message);
+  pref.putInt("hours",j_hours);
+  pref.putInt("minute",j_minute);
+
+
+  String message = savedmessage;
+  int hours = savedhour;
+  int minute = savedminute;
+
+  if(pref.isKey("hours") && pref.isKey("minute")){
+    Serial.println(hours);
+    Serial.println(minute);
+    Serial.println(message);
+      if(timeinfo.tm_hour == hours && timeinfo.tm_min == minute){
+      //digitalWrite(LED_PIN,HIGH);
+      if(message == "R1_ON" && status1 == LOW ){
+        relay1_on();
+        status1 = HIGH;
+        //eventtime = true;
+      }else if(message == "R1_OFF" && status1 == HIGH){
+        relay1_off();
+        status1 = LOW;
+
+      }else if(message == "R2_ON" && status2 == LOW){
+        relay2_on();
+        status2 = HIGH;
+
+      }else if(message == "R2_OFF" && status2 == HIGH){
+        relay2_off();
+        status2 = LOW;
+
+      }else if(message == "R3_ON" && status3 == LOW){
+        relay3_on();
+        status3 = HIGH;
+
+      }else if(message == "R3_OFF" && status3 == HIGH){
+        relay3_off();
+        status3 = LOW;
+
+      }else if(message == "R4_ON" && status4 == LOW){
+        relay4_on();
+        status4 = HIGH;
+
+      }else if(message == "R4_OFF" && status4 == HIGH){
+        relay4_off();
+        status4 = LOW;
+      }
+    }
+
+  }
+    pref.end();
+
+}
+//after second restart that saved time data will lost
+//need to restart the board after gave the time data  
